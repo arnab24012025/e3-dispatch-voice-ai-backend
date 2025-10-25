@@ -37,7 +37,7 @@ class AgentConfigurationUpdate(BaseModel):
     voice_settings: Optional[Dict[str, Any]] = None
     scenario_type: Optional[str] = None
     is_active: Optional[bool] = None
-
+    retell_agent_id: Optional[str] = None 
 
 class AgentConfigurationResponse(AgentConfigurationBase):
     """Schema for agent configuration response"""

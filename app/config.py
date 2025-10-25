@@ -12,11 +12,13 @@ class Settings(BaseSettings):
     # JWT Authentication
     SECRET_KEY: str
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 300
     
     # Retell AI
     RETELL_API_KEY: str
     RETELL_AGENT_ID: str = ""
+    WEBHOOK_BASE_URL: str = ""
+    RETELL_PHONE_NUMBER:str = ""
     
     # Application
     ENVIRONMENT: str = "development"

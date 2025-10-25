@@ -189,3 +189,75 @@ async def refresh_call_status(
         )
     
     return call
+
+@router.post("/web-call", status_code=status.HTTP_201_CREATED)
+async def initiate_web_call(
+    call_data: CallCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Create a web call (browser-based, no phone number needed)
+    Returns access token for frontend
+    """
+    # Get agent
+    agent = db.query(AgentConfiguration).filter(
+        AgentConfiguration.id == call_data.agent_configuration_id
+    ).first()
+    
+    if not agent or not agent.is_active:
+        raise HTTPException(status_code=404, detail="Agent not found or inactive")
+    
+    if not agent.retell_agent_id:
+        raise HTTPException(status_code=400, detail="Agent not configured in Retell AI")
+    
+    # Create call record
+    db_call = Call(
+        driver_name=call_data.driver_name,
+        phone_number=call_data.phone_number,
+        load_number=call_data.load_number,
+        agent_configuration_id=call_data.agent_configuration_id,
+        initiated_by=current_user.id,
+        status=CallStatus.INITIATED
+    )
+    
+    db.add(db_call)
+    db.commit()
+    db.refresh(db_call)
+    
+    try:
+        # Create web call - ALL VALUES MUST BE STRINGS
+        metadata = {
+            "internal_call_id": str(db_call.id),  # ← Convert to string
+            "driver_name": str(call_data.driver_name),  # ← Ensure string
+            "load_number": str(call_data.load_number)  # ← Ensure string
+        }
+        
+        retell_response = await retell_service.create_web_call(
+            agent_id=agent.retell_agent_id,
+            metadata=metadata
+        )
+        
+        # Update database
+        db_call.retell_call_id = retell_response.get("call_id")
+        db_call.status = CallStatus.IN_PROGRESS
+        db_call.started_at = datetime.utcnow()
+        
+        db.commit()
+        
+        # Return data for frontend
+        return {
+            "call_id": db_call.id,
+            "retell_call_id": retell_response.get("call_id"),
+            "access_token": retell_response.get("access_token"),
+            "sample_rate": retell_response.get("sample_rate", 24000),
+            "driver_name": call_data.driver_name,
+            "load_number": call_data.load_number,
+            "status": "ready"
+        }
+        
+    except Exception as e:
+        db_call.status = CallStatus.FAILED
+        db_call.error_message = str(e)
+        db.commit()
+        raise HTTPException(status_code=500, detail=f"Failed: {str(e)}")

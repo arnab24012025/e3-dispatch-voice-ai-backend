@@ -1,144 +1,81 @@
-import httpx
+from retell import Retell
 from typing import Dict, Any, Optional
 from app.config import settings
 
 
 class RetellService:
-    """Service for interacting with Retell AI API"""
-    
-    BASE_URL = ""
+    """Service for interacting with Retell AI"""
     
     def __init__(self):
-        self.api_key = settings.RETELL_API_KEY
-        self.headers = {
-            "Authorization": f"Bearer {self.api_key}",
-            "Content-Type": "application/json"
-        }
+        self.client = Retell(api_key=settings.RETELL_API_KEY)
     
     async def create_phone_call(
         self,
         to_number: str,
         agent_id: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        from_number: Optional[str] = None
+    ) -> Dict[str, Any]:
+        """Initiate an outbound phone call"""
+        if not from_number and not hasattr(settings, 'RETELL_PHONE_NUMBER'):
+            raise ValueError("No phone number configured")
+        
+        try:
+            call = self.client.call.create_phone_call(
+                from_number=from_number or settings.RETELL_PHONE_NUMBER,
+                to_number=to_number,
+                override_agent_id=agent_id,
+                retell_llm_dynamic_variables=metadata or {}
+            )
+            return call.__dict__ if hasattr(call, '__dict__') else {"call_id": str(call)}
+        except Exception as e:
+            print(f"Error creating phone call: {e}")
+            raise
+    
+    async def create_web_call(
+        self,
+        agent_id: str,
         metadata: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
-        Initiate a phone call via Retell AI
-        
-        Args:
-            to_number: Phone number to call (E.164 format)
-            agent_id: Retell AI agent ID
-            metadata: Optional metadata to attach to the call
-            
-        Returns:
-            Call creation response from Retell AI
+        Create a web call (browser-based, no phone number needed)
+        Uses the create_web_call API endpoint
         """
-        async with httpx.AsyncClient() as client:
-            payload = {
-                "to_number": to_number,
-                "agent_id": agent_id,
-                "metadata": metadata or {}
-            }
-            
-            response = await client.post(
-                f"{self.BASE_URL}/create-phone-call",
-                headers=self.headers,
-                json=payload,
-                timeout=30.0
+        try:
+            # Use the SDK's create_web_call method
+            web_call = self.client.call.create_web_call(
+                agent_id=agent_id,
+                metadata=metadata or {}
             )
-            response.raise_for_status()
-            return response.json()
-    
-    async def create_agent(
-        self,
-        agent_name: str,
-        system_prompt: str,
-        initial_message: Optional[str] = None,
-        voice_settings: Optional[Dict[str, Any]] = None
-    ) -> Dict[str, Any]:
-        """
-        Create a new agent in Retell AI
-        
-        Args:
-            agent_name: Name of the agent
-            system_prompt: System prompt for the agent
-            initial_message: Initial message the agent says
-            voice_settings: Voice configuration settings
             
-        Returns:
-            Agent creation response from Retell AI
-        """
-        async with httpx.AsyncClient() as client:
-            payload = {
-                "agent_name": agent_name,
-                "llm_websocket_url": f"{settings.API_PREFIX}/webhook/retell",  # Our webhook URL
-                "voice_id": voice_settings.get("voice_id") if voice_settings else None,
-                "language": "en-US",
-                "response_engine": {
-                    "type": "retell-llm",
-                    "llm_id": "gpt-4"  # or custom model
+            # Return the response - SDK should return call_id and access_token
+            if hasattr(web_call, '__dict__'):
+                return web_call.__dict__
+            elif hasattr(web_call, 'call_id'):
+                return {
+                    "call_id": web_call.call_id,
+                    "access_token": web_call.access_token if hasattr(web_call, 'access_token') else None,
+                    "sample_rate": 24000  # Default
                 }
-            }
-            
-            # Add voice settings if provided
-            if voice_settings:
-                payload["enable_backchannel"] = voice_settings.get("enable_backchannel", True)
-                payload["backchannel_frequency"] = voice_settings.get("backchannel_frequency", "medium")
-                payload["enable_filler_words"] = voice_settings.get("enable_filler_words", True)
-                payload["interruption_sensitivity"] = voice_settings.get("interruption_sensitivity", 5)
-            
-            response = await client.post(
-                f"{self.BASE_URL}/create-agent",
-                headers=self.headers,
-                json=payload,
-                timeout=30.0
-            )
-            response.raise_for_status()
-            return response.json()
+            else:
+                # If it's already a dict
+                return web_call
+                
+        except Exception as e:
+            print(f"Error creating web call: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
     
     async def get_call_details(self, call_id: str) -> Dict[str, Any]:
-        """
-        Get details of a call from Retell AI
-        
-        Args:
-            call_id: Retell AI call ID
-            
-        Returns:
-            Call details from Retell AI
-        """
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.BASE_URL}/get-call/{call_id}",
-                headers=self.headers,
-                timeout=30.0
-            )
-            response.raise_for_status()
-            return response.json()
-    
-    async def update_agent(
-        self,
-        agent_id: str,
-        updates: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """
-        Update an existing agent in Retell AI
-        
-        Args:
-            agent_id: Retell AI agent ID
-            updates: Dictionary of fields to update
-            
-        Returns:
-            Updated agent response from Retell AI
-        """
-        async with httpx.AsyncClient() as client:
-            response = await client.patch(
-                f"{self.BASE_URL}/update-agent/{agent_id}",
-                headers=self.headers,
-                json=updates,
-                timeout=30.0
-            )
-            response.raise_for_status()
-            return response.json()
+        """Get call details"""
+        try:
+            call = self.client.call.retrieve(call_id)
+            return call.__dict__ if hasattr(call, '__dict__') else {}
+        except Exception as e:
+            print(f"Error getting call details: {e}")
+            raise
 
 
-# Create singleton instance
+# Singleton
 retell_service = RetellService()
