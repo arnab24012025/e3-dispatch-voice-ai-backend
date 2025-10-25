@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import init_db
+from app.routes import auth_router, agent_router, call_router, webhook_router
 
 # Create FastAPI app
 app = FastAPI(
@@ -21,12 +22,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Include routers
+app.include_router(auth_router, prefix=settings.API_PREFIX)
+app.include_router(agent_router, prefix=settings.API_PREFIX)
+app.include_router(call_router, prefix=settings.API_PREFIX)
+app.include_router(webhook_router, prefix=settings.API_PREFIX)
+
 
 @app.on_event("startup")
 async def startup_event():
     """Initialize database on startup"""
     print("Starting up...")
     print(f"Environment: {settings.ENVIRONMENT}")
+    # Initialize database tables
     init_db()
     print("Database initialized")
 
