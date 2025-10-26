@@ -21,9 +21,23 @@ async def create_agent_configuration(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Create a new agent configuration
-    """
+    """Create a new agent configuration and Retell AI agent"""
+    
+    # Create agent in Retell AI first
+    try:
+        retell_response = await retell_service.create_agent(
+            agent_name=agent_data.name,
+            system_prompt=agent_data.system_prompt,
+            initial_message=agent_data.initial_message,
+            voice_settings=agent_data.voice_settings
+        )
+        retell_agent_id = retell_response.get("agent_id")
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create agent in Retell: {str(e)}"
+        )
+    
     # Create agent in database
     db_agent = AgentConfiguration(
         name=agent_data.name,
@@ -32,21 +46,9 @@ async def create_agent_configuration(
         initial_message=agent_data.initial_message,
         voice_settings=agent_data.voice_settings,
         scenario_type=agent_data.scenario_type,
+        retell_agent_id=retell_agent_id,
         created_by=current_user.id
     )
-    
-    # Optionally create agent in Retell AI
-    try:
-        retell_response = await retell_service.create_agent(
-            agent_name=agent_data.name,
-            system_prompt=agent_data.system_prompt,
-            initial_message=agent_data.initial_message,
-            voice_settings=agent_data.voice_settings
-        )
-        db_agent.retell_agent_id = retell_response.get("agent_id")
-    except Exception as e:
-        # Log error but continue (agent can be created in Retell later)
-        print(f"Error creating agent in Retell AI: {e}")
     
     db.add(db_agent)
     db.commit()
@@ -62,9 +64,7 @@ async def list_agent_configurations(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    List all agent configurations
-    """
+    """List all agent configurations"""
     agents = db.query(AgentConfiguration).offset(skip).limit(limit).all()
     return agents
 
@@ -75,9 +75,7 @@ async def get_agent_configuration(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Get a specific agent configuration by ID
-    """
+    """Get a specific agent configuration by ID"""
     agent = db.query(AgentConfiguration).filter(AgentConfiguration.id == agent_id).first()
     
     if not agent:
@@ -96,9 +94,7 @@ async def update_agent_configuration(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Update an agent configuration
-    """
+    """Update an agent configuration"""
     agent = db.query(AgentConfiguration).filter(AgentConfiguration.id == agent_id).first()
     
     if not agent:
@@ -120,7 +116,7 @@ async def update_agent_configuration(
                 updates=update_data
             )
         except Exception as e:
-            print(f"Error updating agent in Retell AI: {e}")
+            print(f"Warning: Failed to update agent in Retell: {e}")
     
     db.commit()
     db.refresh(agent)
@@ -134,9 +130,7 @@ async def delete_agent_configuration(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Delete an agent configuration (soft delete - set is_active to False)
-    """
+    """Delete an agent configuration (soft delete)"""
     agent = db.query(AgentConfiguration).filter(AgentConfiguration.id == agent_id).first()
     
     if not agent:
