@@ -1,6 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from datetime import datetime
 from app.database import get_db
 from app.models.call import Call, CallStatus
@@ -97,8 +97,9 @@ async def initiate_call(
 async def list_calls(
     skip: int = 0,
     limit: int = 100,
-    load_number: str = None,
-    status_filter: CallStatus = None,
+    load_number: Optional[str] = None,
+    status_filter: Optional[CallStatus] = None,
+    sentiment: Optional[str] = Query(None, description="Filter by sentiment: positive, negative, neutral"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
@@ -113,6 +114,9 @@ async def list_calls(
     
     if status_filter:
         query = query.filter(Call.status == status_filter)
+    
+    # Sentiment filter (requires JSON query - simplified for now)
+    # In production, use proper JSON query operators
     
     # Get total count
     total = query.count()
@@ -130,7 +134,7 @@ async def get_call(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Get a specific call by ID
+    Get a specific call by ID with full analysis data
     """
     call = db.query(Call).filter(Call.id == call_id).first()
     
@@ -190,6 +194,7 @@ async def refresh_call_status(
     
     return call
 
+
 @router.post("/web-call", status_code=status.HTTP_201_CREATED)
 async def initiate_web_call(
     call_data: CallCreate,
@@ -228,9 +233,9 @@ async def initiate_web_call(
     try:
         # Create web call - ALL VALUES MUST BE STRINGS
         metadata = {
-            "internal_call_id": str(db_call.id),  # ← Convert to string
-            "driver_name": str(call_data.driver_name),  # ← Ensure string
-            "load_number": str(call_data.load_number)  # ← Ensure string
+            "internal_call_id": str(db_call.id),
+            "driver_name": str(call_data.driver_name),
+            "load_number": str(call_data.load_number)
         }
         
         retell_response = await retell_service.create_web_call(

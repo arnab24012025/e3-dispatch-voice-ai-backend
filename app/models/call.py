@@ -42,8 +42,14 @@ class Call(Base):
     # Raw transcript from Retell AI
     raw_transcript = Column(Text, nullable=True)
     
+    # Conversation history from WebSocket (structured messages)
+    conversation_history = Column(JSON, nullable=True)
+    
     # Structured results (extracted data)
     structured_results = Column(JSON, nullable=True)
+    
+    # Post-call analysis (sentiment, quality, summary)
+    post_call_analysis = Column(JSON, nullable=True)
     
     # Recording URL (if available)
     recording_url = Column(String, nullable=True)

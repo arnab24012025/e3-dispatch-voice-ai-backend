@@ -6,6 +6,7 @@ from app.models.call import Call, CallStatus
 from app.schemas.call import WebhookEvent
 from app.services.transcript_processor import transcript_processor
 from app.services.llm_service import llm_service
+from app.services.call_analysis_service import call_analysis_service
 from app.services.settings_service import get_setting
 from app.models.agent import AgentConfiguration
 import json
@@ -100,93 +101,11 @@ FUNCTIONS = [
 ]
 
 
-async def post_process_transcript_with_llm(
-    db: Session,
-    call: Call,
-    transcript: str
-) -> dict:
-    """
-    Post-process transcript using LLM to extract structured data
-    This runs AFTER call ends as a safety net
-    """
-    try:
-        # Get current LLM provider
-        llm_provider = get_setting(db, "llm_provider", default="groq")
-        
-        # Get agent configuration
-        agent = call.agent_configuration
-        if not agent:
-            logger.warning(f"No agent configuration for call {call.id}, using basic processing")
-            return transcript_processor.process_transcript(transcript, None)
-        
-        # Build extraction prompt
-        extraction_prompt = f"""You are analyzing a completed phone call transcript to extract structured information.
-
-Original Agent Instructions:
-{agent.system_prompt}
-
-TASK: Extract all relevant structured data from this transcript. Look for:
-- Delivery status (driving, delayed, arrived, unloading)
-- ETA information
-- Current location
-- Delay reasons
-- Emergency situations
-- Any other relevant logistics information
-
-Return ONLY valid JSON with extracted data. Use null for missing fields.
-
-Transcript:
-{transcript}
-"""
-        
-        # Use LLM to extract data
-        conversation = [{"role": "user", "content": extraction_prompt}]
-        
-        llm_response = await llm_service.generate_response(
-            conversation_history=conversation,
-            system_prompt="You are a data extraction assistant. Extract structured information from transcripts and return valid JSON only.",
-            functions=FUNCTIONS,
-            primary_provider=llm_provider
-        )
-        
-        # Parse function call or content
-        if llm_response.get("function_call"):
-            function_call = llm_response["function_call"]
-            try:
-                arguments = json.loads(function_call.get("arguments", "{}"))
-                return arguments
-            except:
-                logger.error("Failed to parse function arguments in post-processing")
-        
-        # Try to parse content as JSON
-        content = llm_response.get("content", "")
-        try:
-            # Look for JSON in response
-            import re
-            json_match = re.search(r'\{.*\}', content, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group(0))
-        except:
-            pass
-        
-        # Fallback to basic processor
-        logger.warning("LLM post-processing failed, using basic transcript processor")
-        return transcript_processor.process_transcript(transcript, agent.scenario_type)
-        
-    except Exception as e:
-        logger.error(f"Error in LLM post-processing: {e}")
-        # Fallback to basic processing
-        return transcript_processor.process_transcript(
-            transcript,
-            call.agent_configuration.scenario_type if call.agent_configuration else None
-        )
-
-
 @router.post("/retell")
 async def retell_webhook(request: Request, db: Session = Depends(get_db)):
     """
     HTTP Webhook endpoint for Retell AI call events
-    Handles call lifecycle events and post-call processing
+    Handles call lifecycle events and triggers post-call analysis
     """
     body = await request.json()
     
@@ -216,7 +135,7 @@ async def retell_webhook(request: Request, db: Session = Depends(get_db)):
         call.raw_transcript = call_data.get("transcript", "")
         call.recording_url = call_data.get("recording_url")
         
-        # Calculate duration from timestamps
+        # Calculate duration
         start_ts = call_data.get("start_timestamp")
         end_ts = call_data.get("end_timestamp")
         if start_ts and end_ts:
@@ -224,62 +143,48 @@ async def retell_webhook(request: Request, db: Session = Depends(get_db)):
         
         logger.info(f"Call ended: {call_id}, duration: {call.duration}s")
         
-        # Process transcript intelligently
-        if call.raw_transcript:
-            # Check if WebSocket already extracted data
-            has_websocket_data = (
-                call.structured_results and 
-                isinstance(call.structured_results, dict) and 
-                len(call.structured_results) > 0 and
-                "llm_fallbacks" not in call.structured_results  # Not just metadata
-            )
+        # Run post-call analysis
+        if call.raw_transcript or call.conversation_history:
+            logger.info(f"Starting post-call analysis for call {call_id}")
             
-            if has_websocket_data:
-                # WebSocket already extracted data - just log it
-                logger.info(f"Using structured data from WebSocket for call {call_id}")
-                # Mark as processed by WebSocket
-                if not isinstance(call.structured_results, dict):
-                    call.structured_results = {}
-                call.structured_results["data_source"] = "websocket_realtime"
-            else:
-                # WebSocket failed or didn't extract data - use LLM post-processing
-                logger.info(f"WebSocket data missing, using LLM post-processing for call {call_id}")
-                try:
-                    structured_data = await post_process_transcript_with_llm(
-                        db=db,
-                        call=call,
-                        transcript=call.raw_transcript
-                    )
-                    
-                    # Merge with any existing data
-                    if call.structured_results and isinstance(call.structured_results, dict):
-                        call.structured_results.update(structured_data)
-                    else:
-                        call.structured_results = structured_data
-                    
-                    # Mark as processed by webhook
-                    call.structured_results["data_source"] = "webhook_postprocessing"
-                    
-                except Exception as e:
-                    logger.error(f"Error in post-processing for call {call_id}: {e}")
-                    # Store error info
-                    call.structured_results = {
-                        "error": "post_processing_failed",
-                        "message": str(e),
-                        "data_source": "error"
-                    }
+            try:
+                # Get current LLM provider
+                llm_provider = get_setting(db, "llm_provider", default="groq")
+                
+                # Perform analysis
+                analysis_result = await call_analysis_service.analyze_call(
+                    conversation_history=call.conversation_history,
+                    raw_transcript=call.raw_transcript,
+                    structured_results=call.structured_results,
+                    llm_provider=llm_provider
+                )
+                
+                # Add timestamp
+                analysis_result["analysis_timestamp"] = datetime.utcnow().isoformat()
+                
+                # Save analysis
+                call.post_call_analysis = analysis_result
+                
+                logger.info(f"Post-call analysis completed for call {call_id}: "
+                           f"Sentiment={analysis_result.get('sentiment')}, "
+                           f"Quality={analysis_result.get('quality_score')}")
+                
+            except Exception as e:
+                logger.error(f"Error in post-call analysis for call {call_id}: {e}")
+                call.post_call_analysis = {
+                    "error": "analysis_failed",
+                    "message": str(e)
+                }
     
     elif event_type == "call_analyzed":
-        # Retell's own analysis - merge with our data
+        # Merge Retell's analysis
         call_analysis = call_data.get("call_analysis", {})
         if call_analysis:
-            if call.structured_results and isinstance(call.structured_results, dict):
-                # Merge without overwriting our extracted data
-                call.structured_results["retell_analysis"] = call_analysis
-            else:
-                call.structured_results = {"retell_analysis": call_analysis}
+            if not call.post_call_analysis:
+                call.post_call_analysis = {}
+            call.post_call_analysis["retell_analysis"] = call_analysis
         
-        logger.info(f"Call analyzed: {call_id}")
+        logger.info(f"Retell analysis received for call {call_id}")
     
     db.commit()
     return {"status": "ok"}
@@ -288,8 +193,8 @@ async def retell_webhook(request: Request, db: Session = Depends(get_db)):
 @router.websocket("/retell/llm/{call_id}")
 async def retell_llm_websocket(websocket: WebSocket, call_id: str):
     """
-    WebSocket endpoint for Retell AI Custom LLM with real LLM integration
-    Handles real-time conversation with LLM and function calling
+    WebSocket endpoint for Retell AI Custom LLM
+    Handles real-time conversation and saves conversation history
     """
     await websocket.accept()
     logger.info(f"✅ WebSocket connected for call: {call_id}")
@@ -315,7 +220,7 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str):
     llm_provider = get_setting(db, "llm_provider", default="groq")
     logger.info(f"Using LLM provider: {llm_provider}")
     
-    # Conversation history
+    # Conversation history (will be saved to DB)
     conversation_history = []
     
     # Track if conversation should end
@@ -324,6 +229,12 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str):
     try:
         # Send initial message
         initial_message = agent.initial_message or "Hi, this is Dispatch calling. How can I help you today?"
+        
+        # Add to conversation history
+        conversation_history.append({
+            "role": "assistant",
+            "content": initial_message
+        })
         
         initial_response = {
             "response_id": 0,
@@ -355,10 +266,15 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str):
                             break
                 
                 if last_user_message:
+                    # Add to conversation history
                     conversation_history.append({
                         "role": "user",
                         "content": last_user_message
                     })
+                    
+                    # Save conversation history to DB periodically
+                    call.conversation_history = conversation_history
+                    db.commit()
                 
                 # Generate response using LLM
                 try:
@@ -377,7 +293,7 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str):
                     # Log LLM usage
                     logger.info(f"LLM Response - Provider: {provider_used}, Fallback: {fallback_used}")
                     
-                    # Store fallback info in call metadata
+                    # Store fallback info
                     if fallback_used:
                         if not call.structured_results:
                             call.structured_results = {}
@@ -404,7 +320,6 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str):
                         
                         # Execute function
                         if function_name == "update_delivery_status":
-                            # Update call with structured data
                             if not call.structured_results:
                                 call.structured_results = {}
                             call.structured_results.update(arguments)
@@ -414,7 +329,6 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str):
                             response_text = "Got it, I've updated your status. Thank you!"
                         
                         elif function_name == "report_emergency":
-                            # Update call with emergency data
                             if not call.structured_results:
                                 call.structured_results = {}
                             call.structured_results.update({
@@ -437,6 +351,10 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str):
                         "content": response_text
                     })
                     
+                    # Save updated conversation history
+                    call.conversation_history = conversation_history
+                    db.commit()
+                    
                     # Send response
                     response_data = {
                         "response_id": response_id,
@@ -453,7 +371,6 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str):
                 
                 except Exception as e:
                     logger.error(f"Error generating LLM response: {e}")
-                    # Send fallback response
                     error_response = {
                         "response_id": response_id,
                         "content": "I'm having trouble processing that. Can you repeat?",
@@ -472,4 +389,8 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str):
         import traceback
         traceback.print_exc()
     finally:
+        # Final save of conversation history
+        if conversation_history:
+            call.conversation_history = conversation_history
+            db.commit()
         db.close()

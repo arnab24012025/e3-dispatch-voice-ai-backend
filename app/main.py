@@ -1,8 +1,15 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
-from app.database import init_db
-from app.routes import auth_router, agent_router, call_router, webhook_router, settings_router
+from app.database import init_db, get_db
+from app.routes import (
+    auth_router,
+    agent_router,
+    call_router,
+    webhook_router,
+    settings_router,
+    analytics_router
+)
 from app.services.settings_service import initialize_default_settings
 
 # Create FastAPI app
@@ -29,6 +36,7 @@ app.include_router(agent_router, prefix=settings.API_PREFIX)
 app.include_router(call_router, prefix=settings.API_PREFIX)
 app.include_router(webhook_router, prefix=settings.API_PREFIX)
 app.include_router(settings_router, prefix=settings.API_PREFIX)
+app.include_router(analytics_router, prefix=settings.API_PREFIX)
 
 
 @app.on_event("startup")
@@ -39,6 +47,11 @@ async def startup_event():
     # Initialize database tables
     init_db()
     print("Database initialized")
+    
+    # Initialize default settings
+    db = next(get_db())
+    initialize_default_settings(db)
+    print("Default settings initialized")
 
 
 @app.on_event("shutdown")
