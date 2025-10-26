@@ -5,13 +5,189 @@ from app.database import get_db
 from app.models.call import Call, CallStatus
 from app.schemas.call import WebhookEvent
 from app.services.transcript_processor import transcript_processor
+from app.services.llm_service import llm_service
+from app.services.settings_service import get_setting
+from app.models.agent import AgentConfiguration
+import json
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhook", tags=["webhook"])
+
+# Function definitions for LLM
+FUNCTIONS = [
+    {
+        "name": "update_delivery_status",
+        "description": "Update the driver's delivery status with current information",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "status": {
+                    "type": "string",
+                    "enum": ["driving", "delayed", "arrived", "unloading"],
+                    "description": "Current delivery status"
+                },
+                "eta": {
+                    "type": "string",
+                    "description": "Estimated time of arrival"
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Current location or address"
+                },
+                "delay_reason": {
+                    "type": "string",
+                    "description": "Reason for delay if applicable"
+                },
+                "notes": {
+                    "type": "string",
+                    "description": "Additional notes or comments"
+                }
+            },
+            "required": ["status"]
+        }
+    },
+    {
+        "name": "report_emergency",
+        "description": "Report an emergency situation that requires immediate attention",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "emergency_type": {
+                    "type": "string",
+                    "enum": ["accident", "breakdown", "medical", "other"],
+                    "description": "Type of emergency"
+                },
+                "location": {
+                    "type": "string",
+                    "description": "Current location of emergency"
+                },
+                "safety_status": {
+                    "type": "string",
+                    "description": "Safety status of driver and others"
+                },
+                "injury_status": {
+                    "type": "string",
+                    "description": "Information about any injuries"
+                },
+                "load_secure": {
+                    "type": "boolean",
+                    "description": "Whether the load is secure"
+                },
+                "description": {
+                    "type": "string",
+                    "description": "Detailed description of the emergency"
+                }
+            },
+            "required": ["emergency_type", "location"]
+        }
+    },
+    {
+        "name": "end_conversation",
+        "description": "End the conversation when all required information has been collected",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "reason": {
+                    "type": "string",
+                    "description": "Reason for ending conversation"
+                }
+            },
+            "required": []
+        }
+    }
+]
+
+
+async def post_process_transcript_with_llm(
+    db: Session,
+    call: Call,
+    transcript: str
+) -> dict:
+    """
+    Post-process transcript using LLM to extract structured data
+    This runs AFTER call ends as a safety net
+    """
+    try:
+        # Get current LLM provider
+        llm_provider = get_setting(db, "llm_provider", default="groq")
+        
+        # Get agent configuration
+        agent = call.agent_configuration
+        if not agent:
+            logger.warning(f"No agent configuration for call {call.id}, using basic processing")
+            return transcript_processor.process_transcript(transcript, None)
+        
+        # Build extraction prompt
+        extraction_prompt = f"""You are analyzing a completed phone call transcript to extract structured information.
+
+Original Agent Instructions:
+{agent.system_prompt}
+
+TASK: Extract all relevant structured data from this transcript. Look for:
+- Delivery status (driving, delayed, arrived, unloading)
+- ETA information
+- Current location
+- Delay reasons
+- Emergency situations
+- Any other relevant logistics information
+
+Return ONLY valid JSON with extracted data. Use null for missing fields.
+
+Transcript:
+{transcript}
+"""
+        
+        # Use LLM to extract data
+        conversation = [{"role": "user", "content": extraction_prompt}]
+        
+        llm_response = await llm_service.generate_response(
+            conversation_history=conversation,
+            system_prompt="You are a data extraction assistant. Extract structured information from transcripts and return valid JSON only.",
+            functions=FUNCTIONS,
+            primary_provider=llm_provider
+        )
+        
+        # Parse function call or content
+        if llm_response.get("function_call"):
+            function_call = llm_response["function_call"]
+            try:
+                arguments = json.loads(function_call.get("arguments", "{}"))
+                return arguments
+            except:
+                logger.error("Failed to parse function arguments in post-processing")
+        
+        # Try to parse content as JSON
+        content = llm_response.get("content", "")
+        try:
+            # Look for JSON in response
+            import re
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                return json.loads(json_match.group(0))
+        except:
+            pass
+        
+        # Fallback to basic processor
+        logger.warning("LLM post-processing failed, using basic transcript processor")
+        return transcript_processor.process_transcript(transcript, agent.scenario_type)
+        
+    except Exception as e:
+        logger.error(f"Error in LLM post-processing: {e}")
+        # Fallback to basic processing
+        return transcript_processor.process_transcript(
+            transcript,
+            call.agent_configuration.scenario_type if call.agent_configuration else None
+        )
 
 
 @router.post("/retell")
 async def retell_webhook(request: Request, db: Session = Depends(get_db)):
-    """HTTP Webhook endpoint for Retell AI call events"""
+    """
+    HTTP Webhook endpoint for Retell AI call events
+    Handles call lifecycle events and post-call processing
+    """
     body = await request.json()
     
     event_type = body.get("event")
@@ -25,13 +201,14 @@ async def retell_webhook(request: Request, db: Session = Depends(get_db)):
     call = db.query(Call).filter(Call.retell_call_id == call_id).first()
     
     if not call:
-        print(f"Received webhook for unknown call: {call_id}")
+        logger.warning(f"Received webhook for unknown call: {call_id}")
         return {"status": "ok", "message": "Call not found"}
     
     # Handle events
     if event_type == "call_started":
         call.status = CallStatus.IN_PROGRESS
         call.started_at = datetime.utcnow()
+        logger.info(f"Call started: {call_id}")
     
     elif event_type == "call_ended":
         call.status = CallStatus.COMPLETED
@@ -45,24 +222,64 @@ async def retell_webhook(request: Request, db: Session = Depends(get_db)):
         if start_ts and end_ts:
             call.duration = (end_ts - start_ts) // 1000
         
-        # Process transcript
+        logger.info(f"Call ended: {call_id}, duration: {call.duration}s")
+        
+        # Process transcript intelligently
         if call.raw_transcript:
-            try:
-                structured_data = transcript_processor.process_transcript(
-                    transcript=call.raw_transcript,
-                    scenario_type=call.agent_configuration.scenario_type if call.agent_configuration else None
-                )
-                call.structured_results = structured_data
-            except Exception as e:
-                print(f"Error processing transcript: {e}")
+            # Check if WebSocket already extracted data
+            has_websocket_data = (
+                call.structured_results and 
+                isinstance(call.structured_results, dict) and 
+                len(call.structured_results) > 0 and
+                "llm_fallbacks" not in call.structured_results  # Not just metadata
+            )
+            
+            if has_websocket_data:
+                # WebSocket already extracted data - just log it
+                logger.info(f"Using structured data from WebSocket for call {call_id}")
+                # Mark as processed by WebSocket
+                if not isinstance(call.structured_results, dict):
+                    call.structured_results = {}
+                call.structured_results["data_source"] = "websocket_realtime"
+            else:
+                # WebSocket failed or didn't extract data - use LLM post-processing
+                logger.info(f"WebSocket data missing, using LLM post-processing for call {call_id}")
+                try:
+                    structured_data = await post_process_transcript_with_llm(
+                        db=db,
+                        call=call,
+                        transcript=call.raw_transcript
+                    )
+                    
+                    # Merge with any existing data
+                    if call.structured_results and isinstance(call.structured_results, dict):
+                        call.structured_results.update(structured_data)
+                    else:
+                        call.structured_results = structured_data
+                    
+                    # Mark as processed by webhook
+                    call.structured_results["data_source"] = "webhook_postprocessing"
+                    
+                except Exception as e:
+                    logger.error(f"Error in post-processing for call {call_id}: {e}")
+                    # Store error info
+                    call.structured_results = {
+                        "error": "post_processing_failed",
+                        "message": str(e),
+                        "data_source": "error"
+                    }
     
     elif event_type == "call_analyzed":
+        # Retell's own analysis - merge with our data
         call_analysis = call_data.get("call_analysis", {})
         if call_analysis:
-            if call.structured_results:
-                call.structured_results.update(call_analysis)
+            if call.structured_results and isinstance(call.structured_results, dict):
+                # Merge without overwriting our extracted data
+                call.structured_results["retell_analysis"] = call_analysis
             else:
-                call.structured_results = call_analysis
+                call.structured_results = {"retell_analysis": call_analysis}
+        
+        logger.info(f"Call analyzed: {call_id}")
     
     db.commit()
     return {"status": "ok"}
@@ -71,34 +288,60 @@ async def retell_webhook(request: Request, db: Session = Depends(get_db)):
 @router.websocket("/retell/llm/{call_id}")
 async def retell_llm_websocket(websocket: WebSocket, call_id: str):
     """
-    WebSocket endpoint for Retell AI Custom LLM
-    
-    Based on: https://docs.retellai.com/custom-llm/custom-llm-overview
+    WebSocket endpoint for Retell AI Custom LLM with real LLM integration
+    Handles real-time conversation with LLM and function calling
     """
     await websocket.accept()
-    print(f"✅ WebSocket connected for call: {call_id}")
+    logger.info(f"✅ WebSocket connected for call: {call_id}")
+    
+    # Get database session
+    db = next(get_db())
+    
+    # Get call from database
+    call = db.query(Call).filter(Call.retell_call_id == call_id).first()
+    if not call:
+        logger.error(f"Call not found: {call_id}")
+        await websocket.close()
+        return
+    
+    # Get agent configuration
+    agent = call.agent_configuration
+    if not agent:
+        logger.error(f"Agent configuration not found for call: {call_id}")
+        await websocket.close()
+        return
+    
+    # Get current LLM provider
+    llm_provider = get_setting(db, "llm_provider", default="groq")
+    logger.info(f"Using LLM provider: {llm_provider}")
+    
+    # Conversation history
+    conversation_history = []
+    
+    # Track if conversation should end
+    should_end_call = False
     
     try:
-        # CRITICAL: Send initial message immediately upon connection
-        # This is required by Retell AI's protocol
-        initial_message = {
+        # Send initial message
+        initial_message = agent.initial_message or "Hi, this is Dispatch calling. How can I help you today?"
+        
+        initial_response = {
             "response_id": 0,
-            "content": "Hi, this is Dispatch calling about your delivery. How can I help you today?",
+            "content": initial_message,
             "content_complete": True,
             "end_call": False
         }
         
-        print(f"📤 Sending initial message: {initial_message}")
-        await websocket.send_json(initial_message)
+        logger.info(f"📤 Sending initial message")
+        await websocket.send_json(initial_response)
         
-        # Now listen for messages from Retell
+        # Listen for messages
         while True:
             data = await websocket.receive_json()
-            print(f"📥 RECEIVED from Retell: {data}")
+            logger.info(f"📥 RECEIVED from Retell")
             
             interaction_type = data.get("interaction_type")
             
-            # Only respond when Retell explicitly requests a response
             if interaction_type == "response_required":
                 response_id = data.get("response_id")
                 transcript = data.get("transcript", [])
@@ -111,57 +354,122 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str):
                             last_user_message = msg.get("content", "")
                             break
                 
-                # Generate response based on context
-                response_text = generate_response(last_user_message)
+                if last_user_message:
+                    conversation_history.append({
+                        "role": "user",
+                        "content": last_user_message
+                    })
                 
-                response_data = {
-                    "response_id": response_id,
-                    "content": response_text,
-                    "content_complete": True,
-                    "end_call": False
-                }
+                # Generate response using LLM
+                try:
+                    llm_response = await llm_service.generate_response(
+                        conversation_history=conversation_history,
+                        system_prompt=agent.system_prompt,
+                        functions=FUNCTIONS,
+                        primary_provider=llm_provider
+                    )
+                    
+                    response_text = llm_response.get("content", "")
+                    function_call = llm_response.get("function_call")
+                    provider_used = llm_response.get("provider_used")
+                    fallback_used = llm_response.get("fallback_used")
+                    
+                    # Log LLM usage
+                    logger.info(f"LLM Response - Provider: {provider_used}, Fallback: {fallback_used}")
+                    
+                    # Store fallback info in call metadata
+                    if fallback_used:
+                        if not call.structured_results:
+                            call.structured_results = {}
+                        if "llm_fallbacks" not in call.structured_results:
+                            call.structured_results["llm_fallbacks"] = []
+                        call.structured_results["llm_fallbacks"].append({
+                            "timestamp": datetime.utcnow().isoformat(),
+                            "primary": llm_provider,
+                            "used": provider_used
+                        })
+                        db.commit()
+                    
+                    # Handle function call
+                    if function_call:
+                        function_name = function_call.get("name")
+                        arguments_str = function_call.get("arguments", "{}")
+                        
+                        try:
+                            arguments = json.loads(arguments_str)
+                        except:
+                            arguments = {}
+                        
+                        logger.info(f"🔧 Function called: {function_name} with args: {arguments}")
+                        
+                        # Execute function
+                        if function_name == "update_delivery_status":
+                            # Update call with structured data
+                            if not call.structured_results:
+                                call.structured_results = {}
+                            call.structured_results.update(arguments)
+                            call.structured_results["data_source"] = "websocket_realtime"
+                            db.commit()
+                            
+                            response_text = "Got it, I've updated your status. Thank you!"
+                        
+                        elif function_name == "report_emergency":
+                            # Update call with emergency data
+                            if not call.structured_results:
+                                call.structured_results = {}
+                            call.structured_results.update({
+                                "emergency": True,
+                                **arguments
+                            })
+                            call.structured_results["data_source"] = "websocket_realtime"
+                            db.commit()
+                            
+                            response_text = "I understand this is an emergency. I'm connecting you to a dispatcher now."
+                            should_end_call = True
+                        
+                        elif function_name == "end_conversation":
+                            response_text = "Thank you for the update. Drive safely!"
+                            should_end_call = True
+                    
+                    # Add assistant response to history
+                    conversation_history.append({
+                        "role": "assistant",
+                        "content": response_text
+                    })
+                    
+                    # Send response
+                    response_data = {
+                        "response_id": response_id,
+                        "content": response_text,
+                        "content_complete": True,
+                        "end_call": should_end_call
+                    }
+                    
+                    logger.info(f"📤 SENDING response (end_call={should_end_call})")
+                    await websocket.send_json(response_data)
+                    
+                    if should_end_call:
+                        break
                 
-                print(f"📤 SENDING response: {response_data}")
-                await websocket.send_json(response_data)
+                except Exception as e:
+                    logger.error(f"Error generating LLM response: {e}")
+                    # Send fallback response
+                    error_response = {
+                        "response_id": response_id,
+                        "content": "I'm having trouble processing that. Can you repeat?",
+                        "content_complete": True,
+                        "end_call": False
+                    }
+                    await websocket.send_json(error_response)
             
             elif interaction_type == "update_only":
-                # Just log, don't respond
-                print(f"⏭️ Update only - no response needed")
-            
+                logger.debug("ℹ️ Update only - no response needed")
+        
     except WebSocketDisconnect:
-        print(f"🔌 WebSocket disconnected for call: {call_id}")
+        logger.info(f"🔌 WebSocket disconnected for call: {call_id}")
     except Exception as e:
-        print(f"💥 WebSocket error: {e}")
+        logger.error(f"💥 WebSocket error: {e}")
         import traceback
         traceback.print_exc()
-
-
-def generate_response(user_message: str) -> str:
-    """
-    Generate appropriate response based on user message
-    
-    In production, this would call an LLM like OpenAI GPT-4
-    """
-    user_message_lower = user_message.lower()
-    
-    # Simple keyword-based responses for demo
-    if any(word in user_message_lower for word in ["hello", "hi", "hey"]):
-        return "Hello! Thanks for answering. I'm calling about your delivery. Can you give me a quick status update?"
-    
-    elif any(word in user_message_lower for word in ["emergency", "accident", "crash", "breakdown"]):
-        return "I understand this is an emergency. First, is everyone safe? What's your current location?"
-    
-    elif any(word in user_message_lower for word in ["delayed", "late", "stuck", "traffic"]):
-        return "I see there's a delay. Can you tell me approximately how long you expect to be delayed?"
-    
-    elif any(word in user_message_lower for word in ["arrived", "here", "delivered"]):
-        return "Great! Thank you for confirming delivery. Is there anything else you need assistance with?"
-    
-    elif any(word in user_message_lower for word in ["yes", "yeah", "yep"]):
-        return "Perfect. Can you provide me with more details?"
-    
-    elif any(word in user_message_lower for word in ["no", "nope", "not really"]):
-        return "Understood. Is there anything else I can help you with today?"
-    
-    else:
-        return "I understand. Can you tell me more about your current delivery status?"
+    finally:
+        db.close()

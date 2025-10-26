@@ -19,6 +19,12 @@ from app.schemas.call import (
     CheckInResult,
     EmergencyResult
 )
+from app.schemas.settings import (
+    LLMProviderUpdate,
+    LLMProviderResponse,
+    AvailableLLMsResponse,
+    SystemSettingResponse
+)
 
 __all__ = [
     "UserCreate",
@@ -35,5 +41,9 @@ __all__ = [
     "CallListResponse",
     "WebhookEvent",
     "CheckInResult",
-    "EmergencyResult"
+    "EmergencyResult",
+     "LLMProviderUpdate",
+    "LLMProviderResponse",
+    "AvailableLLMsResponse",
+    "SystemSettingResponse"
 ]

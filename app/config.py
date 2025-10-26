@@ -20,6 +20,17 @@ class Settings(BaseSettings):
     WEBHOOK_BASE_URL: str = ""
     RETELL_PHONE_NUMBER:str = ""
     
+    # LLM Providers
+    GROQ_API_KEY: str = ""
+    OPENAI_API_KEY: str = ""
+    
+     # LLM Models
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    OPENAI_MODEL: str = "gpt-4o-mini"
+    
+    # Default LLM Provider (used on first initialization)
+    DEFAULT_LLM_PROVIDER: str = "groq"
+    
     # Application
     ENVIRONMENT: str = "development"
     DEBUG: bool = True

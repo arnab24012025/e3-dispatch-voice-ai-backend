@@ -2,7 +2,8 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import init_db
-from app.routes import auth_router, agent_router, call_router, webhook_router
+from app.routes import auth_router, agent_router, call_router, webhook_router, settings_router
+from app.services.settings_service import initialize_default_settings
 
 # Create FastAPI app
 app = FastAPI(
@@ -27,6 +28,7 @@ app.include_router(auth_router, prefix=settings.API_PREFIX)
 app.include_router(agent_router, prefix=settings.API_PREFIX)
 app.include_router(call_router, prefix=settings.API_PREFIX)
 app.include_router(webhook_router, prefix=settings.API_PREFIX)
+app.include_router(settings_router, prefix=settings.API_PREFIX)
 
 
 @app.on_event("startup")
