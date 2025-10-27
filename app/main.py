@@ -10,6 +10,7 @@ from app.routes import (
     settings_router,
     analytics_router
 )
+
 from app.services.settings_service import initialize_default_settings
 
 # Create FastAPI app
