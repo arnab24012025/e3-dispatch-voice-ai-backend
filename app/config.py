@@ -1,5 +1,6 @@
 from pydantic_settings import BaseSettings
 from typing import List
+import os
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables"""
@@ -16,9 +17,11 @@ class Settings(BaseSettings):
     
     # Retell AI
     RETELL_API_KEY: str
-    RETELL_AGENT_ID: str = ""
-    WEBHOOK_BASE_URL: str = ""
+    RETELL_AGENT_ID: str = "" 
     RETELL_PHONE_NUMBER:str = ""
+    
+    WEBHOOK_BASE_URL: str = os.getenv("WEBHOOK_BASE_URL", "")
+    WEBSOCKET_BASE_URL: str = os.getenv("WEBSOCKET_BASE_URL", "")
     
     # LLM Providers
     GROQ_API_KEY: str = ""

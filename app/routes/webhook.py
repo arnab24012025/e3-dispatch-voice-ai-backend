@@ -248,15 +248,16 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str):
             "end_call": False
         }
         
-        logger.info(f"📤 Sending initial message")
+        logger.info(f"📤 Sending initial: {initial_message}") 
         await websocket.send_json(initial_response)
         
         # Listen for messages
         while True:
             data = await websocket.receive_json()
-            logger.info(f"📥 RECEIVED from Retell")
+            logger.info(f"📥 Received message: {data}")
             
             interaction_type = data.get("interaction_type")
+            logger.info(f"📥 Interaction type: {interaction_type}") 
             
             if interaction_type == "response_required":
                 response_id = data.get("response_id")

@@ -258,6 +258,7 @@ async def initiate_web_call(
             "sample_rate": retell_response.get("sample_rate", 24000),
             "driver_name": call_data.driver_name,
             "load_number": call_data.load_number,
+            "agent_configuration_id":call_data.agent_configuration_id,
             "status": "ready"
         }
         

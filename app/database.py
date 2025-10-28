@@ -1,12 +1,17 @@
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import QueuePool
 from app.config import settings
 
 # Create SQLAlchemy engine
 engine = create_engine(
     settings.DATABASE_URL,
-    pool_pre_ping=True,  # Verify connections before using
+    poolclass=QueuePool,      # Add
+    pool_size=3,              # Add (limit connections)
+    max_overflow=0,           # Add (no extra connections)
+    pool_pre_ping=True,
+    pool_recycle=300,
     echo=settings.DEBUG,  # Log SQL queries in debug mode
 )
 

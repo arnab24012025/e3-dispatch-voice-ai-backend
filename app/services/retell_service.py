@@ -92,10 +92,12 @@ class RetellService:
             if voice_settings and "voice_id" in voice_settings:
                 voice_id = voice_settings["voice_id"]
             
-            # Build Custom LLM WebSocket URL
-            # Format: wss://your-domain.com/api/v1/webhook/retell/llm/{call_id}
-            llm_websocket_url = f"{settings.WEBHOOK_BASE_URL}/api/v1/webhook/retell/llm/{{call_id}}"
-            
+                       
+            llm_websocket_url = f"{settings.WEBSOCKET_BASE_URL}/api/v1/webhook/retell/llm/"
+            agent_webhook_url = f"{settings.WEBHOOK_BASE_URL}/api/v1/webhook/retell"
+        
+            print(f"🔍 DEBUG - LLM URL before sending: {llm_websocket_url}")
+            print(f"🔍 DEBUG - Type: {type(llm_websocket_url)}")
             # Create agent with Custom LLM
             agent_response = self.client.agent.create(
                 response_engine={
@@ -105,12 +107,18 @@ class RetellService:
                 voice_id=voice_id,
                 agent_name=agent_name,
                 language="en-US",
+                webhook_url=agent_webhook_url,
             )
+            
+            print(f"✅ Agent created: {agent_response.agent_id}")
+            print(f"   LLM URL: {llm_websocket_url}")
+            print(f"   Webhook URL: {agent_webhook_url}")
             
             return {
                 "agent_id": agent_response.agent_id,
                 "status": "created",
-                "llm_websocket_url": llm_websocket_url
+                "llm_websocket_url": llm_websocket_url,
+                "webhook_url": agent_webhook_url  
             }
             
         except Exception as e:
