@@ -76,12 +76,17 @@ FUNCTIONS = [
                     "type": "boolean",
                     "description": "Whether the load is secure"
                 },
+                "escalation_status": {  
+                    "type": "string",
+                    "enum": ["Escalation Required", "Connected to Human Dispatcher"],
+                    "description": "Current escalation status - set to 'Connected to Human Dispatcher' when informing driver"
+                },
                 "description": {
                     "type": "string",
                     "description": "Detailed description of the emergency"
                 }
             },
-            "required": ["emergency_type", "location"]
+            "required": ["emergency_type", "location", "escalation_status"]
         }
     },
     {
@@ -322,19 +327,39 @@ async def retell_llm_websocket(websocket: WebSocket, call_id: str):
                         if function_name == "update_delivery_status":
                             if not call.structured_results:
                                 call.structured_results = {}
-                            call.structured_results.update(arguments)
-                            call.structured_results["data_source"] = "websocket_realtime"
+    
+                            # Structured check-in data
+                            checkin_data = {
+                                "call_outcome": "Successful Check-in",
+                                "delivery_status": arguments.get("status", "unknown"),
+                                "current_location": arguments.get("location", "Not provided"),
+                                "eta": arguments.get("eta", "Not provided"),
+                                "delay_reason": arguments.get("delay_reason"),
+                                "notes": arguments.get("notes", ""),
+                                "data_source": "websocket_realtime"
+                            }
+    
+                            call.structured_results.update(checkin_data)
                             db.commit()
-                            
                             response_text = "Got it, I've updated your status. Thank you!"
                         
                         elif function_name == "report_emergency":
                             if not call.structured_results:
                                 call.structured_results = {}
-                            call.structured_results.update({
+                            
+                            emergency_data = {
+                                "call_outcome": "Emergency Escalation",
                                 "emergency": True,
-                                **arguments
-                            })
+                                "emergency_type": arguments.get("emergency_type"),
+                                "emergency_location": arguments.get("location"),  # Rename location → emergency_location
+                                "safety_status": arguments.get("safety_status"),
+                                "injury_status": arguments.get("injury_status"),
+                                "load_secure": arguments.get("load_secure"),
+                                "description": arguments.get("description"),
+                                "escalation_status": arguments.get("escalation_status", "Escalation Required"),  # ← From AI
+                            }
+                            
+                            call.structured_results.update(emergency_data)
                             call.structured_results["data_source"] = "websocket_realtime"
                             db.commit()
                             
