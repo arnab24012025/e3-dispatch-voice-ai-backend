@@ -99,21 +99,12 @@ class RetellService:
             # Create agent with Custom LLM
             agent_response = self.client.agent.create(
                 response_engine={
-                    "type": "custom_llm",  # ← Use YOUR LLM via WebSocket
+                    "type": "custom-llm",
                     "llm_websocket_url": llm_websocket_url,
-                    # System prompt and initial message handled in YOUR WebSocket
                 },
                 voice_id=voice_id,
                 agent_name=agent_name,
                 language="en-US",
-                
-                # Advanced settings from voice_settings
-                enable_backchannel=voice_settings.get("enable_backchannel", True) if voice_settings else True,
-                backchannel_frequency=voice_settings.get("backchannel_frequency", "medium") if voice_settings else "medium",
-                backchannel_words=voice_settings.get("backchannel_words", ["mm-hmm", "yeah", "I see"]) if voice_settings else ["mm-hmm", "yeah", "I see"],
-                interruption_sensitivity=voice_settings.get("interruption_sensitivity", 5) if voice_settings else 5,
-                enable_natural_filler_words=voice_settings.get("enable_filler_words", True) if voice_settings else True,
-                responsiveness=voice_settings.get("responsiveness", 1.0) if voice_settings else 1.0,
             )
             
             return {
